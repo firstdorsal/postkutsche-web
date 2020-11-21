@@ -1,0 +1,17 @@
+{
+    "name": "postkutsche-web",
+    "version": "0.0.1",
+    "description": "",
+    "main": "index.js",
+    "repository": {
+        "type": "git",
+        "url": "http://git.y.gy/firstdorsal/postkutsche-web.git"
+    },
+    "homepage": "https://doc.y.gy/postkutsche-web/",
+    "author": "Paul Colin Hennig",
+    "license": "MPL-2.0",
+    "devDependencies": {
+        "dotenv": "^8.2.0",
+        "eslint": "^7.14.0"
+    }
+}
