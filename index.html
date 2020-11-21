@@ -1,0 +1,1718 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+
+<body>
+    <script>
+        "use strict";
+
+        const f = fetch;
+        const secondLevelRegex = new RegExp(/[A-Z-a-z0-9]{1,63}\.[A-Z-a-z0-9]{1,63}$/);
+        /** 
+         * @typedef Cryptokey
+         * @type {object}      
+         * @prop {'ksk'|'zsk'|'csk'} keytype The type of the key possible values are 
+         * @prop {boolean} active Whether or not the key is in active use      
+         * @prop {boolean} published Whether or not the DNSKEY record is published in the zone      
+         * @prop {string} dnskey The DNSKEY record for this key      
+         * @prop {string} privatekey The private key in ISC format      
+         * @prop {string} algorithm The name of the algorithm of the key, should be a mnemonic
+         */
+
+
+        /** 
+         * @typedef Search
+         * @type {object}
+         * @prop {string} query query to search for
+         * @prop {number} [max=10] limits the ammount of returned values
+         * @prop {'all'|'zone'|'record'|'comment'} [object_type=record] for what kind of pdns object to search
+         * @example
+         * {query: 'example.com', max: 100, object_type: "zone"}
+         */
+
+        /** 
+         * @typedef Records
+         * @type {Array.<Record>}
+         * @example
+         * [{
+            name: "example.com",
+            type: "A",
+            ttl: 300,
+            content: ['1.1.1.1', '8.8.8.8']
+        }, {
+            name: "*.example.com",
+            type: "A",
+            ttl: 300,
+            content: ['1.1.1.1', '8.8.8.8']
+        }]
+         */
+
+        /**
+         * @typedef Record
+         * @type {object}
+         * @prop {string} name key name of the record
+         * @prop {string} [type='A'] type of the record
+         * @prop {number} [ttl=3600] time to live of the record
+         * @prop {Array} content value array with content of the record
+         * @example
+         * {name: "example.com", type: "A", ttl: 300, content: ['1.1.1.1', '8.8.8.8']}
+         *
+         */
+
+
+
+        /** @module powerdns-api */
+        /** @class Class representing the powerdns client 
+        *@example 
+        (async () => {
+            require('dotenv').config();
+
+            const {
+                PowerdnsClient
+            } = require('@firstdorsal/powerdns-api');
+
+            const pdns = new PowerdnsClient(process.env.PDNS_API_ENDPOINT, process.env.PDNS_API_KEY);
+
+            console.log(await pdns.getZone('example.com'));
+        })();
+        */
+
+
+
+        class PowerdnsClient {
+            /**
+             * Create a powerdns client.
+             * @constructor
+             * @param {string} baseurl The base url where the api can be found
+             * @param {string} apikey The api key for the powerdns endpoint
+             */
+            constructor(baseurl, apikey) {
+                this.baseurl = baseurl;
+                this.apikey = apikey;
+            }
+            /**
+             * Takes domain name as string. Returns the domain name as string in absolute form with a . at the end. example.com -> example.com. and example.com. -> example.com.
+             * @private
+             * @param {string} name takes a domain name
+             * @returns {string} the domain name in absolute form ending with a dot
+             */
+            absoluteName(name) {
+                if (name[name.length - 1] !== '.') return name + '.';
+                return name;
+            }
+
+            /**
+             * takes array of records and sorts its contents by name into multiple arrays
+             * @private
+             * @param {Array} records array of records
+             * @returns {Array} array of arrays with records with the same name
+             * */
+            sortRecordsByDomainName(records) {
+                const result = [];
+                for (let i = 0; i < records.length; i++) {
+                    let p = false;
+                    for (let j = 0; j < result.length; j++) {
+                        if (records[i].name === result[j][0].name) {
+                            result[j].push(records[i]);
+                            p = true;
+                            break;
+                        }
+
+                    }
+                    if (!p) result.push([records[i]]);
+                }
+                return result;
+            }
+            /**
+             * Returns array of all zones from this pdns server.
+             * @async
+             * @returns {Array} array of zones
+             * @example 
+               await pdns.getZones();
+             */
+            getZones() {
+                return f(this.baseurl + '/zones', {
+                    method: 'GET',
+                    headers: {
+                        'X-Api-Key': this.apikey
+                    },
+                    json: true
+                }).then((res) => {
+                    return res.json();
+                });
+            }
+            /**
+             * Creates zone/domain and returns its SOA record on success.
+
+             * @async
+             * @param {string} zoneName takes a domain name
+             * @param {('Native'|'Master'|'Slave')} [kind=Native] takes the kind of zone you want
+             * @returns {Object} just the rrsets of the zone
+             * @example 
+               await pdns.createZone('example.com');
+             */
+            createZone(zoneName, kind = 'Native') {
+                const dname = this.absoluteName(zoneName);
+                const zoneNameSan = dname.substr(0, dname.length - 1).match(secondLevelRegex)[0];
+                return f(`${this.baseurl}/zones`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        name: zoneNameSan + '.',
+                        kind
+                    })
+                }).then(async (res) => {
+                    let j = await res.text().catch();
+                    try {
+                        j = JSON.parse(j);
+                    } catch (err) {
+                        throw j;
+                    }
+                    if (!j.rrsets) return false;
+                    return j.rrsets[0]
+                }).catch((err) => {
+                    throw new Error(err);
+                });
+            }
+            /**
+             * Returns single zone with meta information. 
+             * @async
+             * @param {string} zoneName takes a domain name
+             * @returns {object} the zone with meta information
+             * @example 
+               await pdns.getZoneWithMeta('example.com');
+             */
+            getZoneWithMeta(zoneName) {
+                zoneName = this.absoluteName(zoneName);
+                return f(this.baseurl + '/zones/' + zoneName, {
+                    method: 'GET',
+                    headers: {
+                        'X-Api-Key': this.apikey
+                    },
+                    json: true
+                }).then((res) => {
+                    return res.json();
+                });
+            }
+            /**
+             * Returns array with rrsets for zone.
+             * @async
+             * @param {string} zoneName takes a domain name
+             * @returns {object} just the rrsets of the zone
+             * @example 
+               await pdns.getZone('example.com');
+             */
+            getZone(zoneName) {
+                const dname = this.absoluteName(zoneName);
+                const zoneNameSan = dname.substr(0, dname.length - 1).match(secondLevelRegex)[0];
+                return f(this.baseurl + '/zones/' + zoneNameSan, {
+                    method: 'GET',
+                    headers: {
+                        'X-Api-Key': this.apikey
+                    },
+                    json: true
+                }).then((res) => {
+                    return res.json().catch(() => {});
+                }).then((json) => {
+                    if (json && json.rrsets) return json.rrsets;
+                    return null;
+                });
+            }
+            /**
+             * Deletes the whole zone with all attached metadata and rrsets.
+             * @async
+             * @param {string} zoneName takes a domain name
+             * @returns {boolean} true on success
+             * @example 
+               await pdns.deleteZone('example.com');
+             */
+            deleteZone(zoneName) {
+                const dname = this.absoluteName(zoneName);
+                const zoneNameSan = dname.substr(0, dname.length - 1).match(secondLevelRegex)[0];
+                return f(this.baseurl + '/zones/' + zoneNameSan, {
+                    method: 'DELETE',
+                    headers: {
+                        'X-Api-Key': this.apikey
+                    },
+                    json: true
+                }).then(async (res) => {
+                    let j = await res.text();
+
+                    if (j === undefined || j.length === 0) return true;
+                    return false;
+                }).catch((err) => {
+                    throw err;
+                })
+            }
+            /**
+             * Takes records for a SINGLE domain as array and sets them. If records exist it replaces them.
+             * @async
+             * @param {Records} records array containing the records
+             * @returns {boolean} boolean indicating the success of the operation
+             * @example 
+               await pdns.setHomogeneousRecords([{
+                   name: "example.com",
+                   type: "A",
+                   ttl: 300,
+                   content: ['1.1.1.1']
+               }]);
+             */
+            setHomogeneousRecords(records) {
+                if (!Array.isArray(records)) throw new TypeError('Parameter must be of type array');
+
+                const dname = this.absoluteName(records[0].name);
+                const zoneName = dname.substr(0, dname.length - 1).match(secondLevelRegex)[0];
+                let rrsets = [];
+                for (let i = 0; i < records.length; i++) {
+                    let recordsOut = [];
+                    for (let j = 0; j < records[i].content.length; j++) {
+
+                        recordsOut.push({
+                            "content": records[i].content[j],
+                            "disabled": false,
+                            "ttl": typeof (records[i].ttl) == 'undefined' ? 3600 : records[i].ttl,
+                            "name": this.absoluteName(records[i].name),
+                            "type": typeof (records[i].type) == 'undefined' ? 'A' : records[i].type
+                        });
+                    }
+                    rrsets.push({
+                        "name": this.absoluteName(records[i].name),
+                        "type": typeof (records[i].type) == 'undefined' ? 'A' : records[i].type,
+                        "ttl": typeof (records[i].ttl) == 'undefined' ? 3600 : records[i].ttl,
+                        "changetype": "REPLACE",
+                        records: recordsOut
+                    });
+                }
+                return f(this.baseurl + '/zones/' + zoneName, {
+                    method: 'PATCH',
+                    headers: {
+                        'X-Api-Key': this.apikey
+                    },
+                    body: JSON.stringify({
+                        rrsets
+                    })
+                }).then(async (res) => {
+                    let j = await res.text().catch();
+                    if (j.includes('error')) console.log(j);
+
+                    if (j) {
+                        try {
+                            j = JSON.parse(j);
+                        } catch (err) {
+                            throw j;
+                        }
+                    }
+                    if (j === undefined || j.length === 0) return true;
+                    return false;
+
+                }).catch((err) => {
+                    throw err;
+                });
+            }
+            /**
+             * Takes records as array and deletes them.
+             * @async
+             * @param {Records} records array containing the records to be deleted
+             * @returns {boolean} boolean indicating the success of the operation
+             * @example
+               await pdns.deleteRecords([{
+                   name: "example.com",
+                   type: "A"
+               }]);
+             */
+            deleteRecords(records) {
+                if (!Array.isArray(records)) throw new TypeError('Parameter must be of type array');
+                const dname = this.absoluteName(records[0].name);
+                const zoneName = dname.substr(0, dname.length - 1).match(secondLevelRegex)[0];
+
+                let rrsets = [];
+                for (let i = 0; i < records.length; i++) {
+                    rrsets.push({
+                        "name": this.absoluteName(records[i].name),
+                        "type": records[i].type,
+                        "changetype": "DELETE",
+                    });
+                }
+
+                return f(this.baseurl + '/zones/' + zoneName, {
+                    method: 'PATCH',
+                    headers: {
+                        'X-Api-Key': this.apikey
+                    },
+                    body: JSON.stringify({
+                        rrsets
+                    })
+                }).then(async (res) => {
+                    let j = await res.text().catch();
+                    if (j) {
+                        try {
+                            j = JSON.parse(j);
+                        } catch (err) {
+                            throw j;
+                        }
+                    }
+                    if (j === undefined || j.length === 0) return true;
+                    return false;
+                }).catch((err) => {
+                    throw err;
+                });
+            }
+            /**
+             * Takes Search object and searches for matching elements in the pdns server.
+             * @async
+             * @param {Search} search object with the query paramters
+             * @returns {object} search results
+             * @example
+               await pdns.search({
+                   query: 'example.com',
+                   max: 100,
+                   object_type: "zone"
+               });
+             */
+            search(search = {}) {
+                if (!search.max) search.max = 10;
+                if (!search.object_type) search.object_type = 'record';
+                if (!search.query) return null;
+                return f(
+                    `${this.baseurl}/search-data?q=${search.query}&max=${search.max}&object_type=${search.object_type}`, {
+                        method: 'GET',
+                        headers: {
+                            'X-Api-Key': this.apikey
+                        },
+                        json: true
+                    }).then((res) => {
+                    return res.json().catch((err) => {
+                        console.log(err);
+                    });
+                }).then((json) => {
+                    if (json) return json;
+                    return null;
+
+                });
+            }
+            /**
+             * Takes ONE record as object and appends it not replacing other records with the same name.
+             * @async
+             * @param {Record} record array containing the records to be appended
+             * @returns {boolean} boolean indicating the success of the operation
+             * @example
+               await pdns.appendRecord({
+                   name: "example.com",
+                   type: "A",
+                   ttl: 300,
+                   content: ['1.1.1.1','2.2.2.2']
+               });
+             */
+            async appendRecord(record) {
+                const a = await this.search({
+                    query: record.name
+                });
+                if (a) {
+                    for (let i = 0; i < a.length; i++) {
+                        if (a[i] && a[i].type !== 'PTR') record.content.push(a[i].content);
+                    }
+                }
+                return await this.setRecords([record]);
+            }
+            /**
+             * Creates a DNS Cryptokey and enables it for DNSSEC. If you want to import your own please read the original [documentation]{@link https://doc.powerdns.com/authoritative/http-api/cryptokey.html} and put it in the Cryptokey parameter.
+             * @async
+             * @param {string} zoneName name of the zone/domain 
+             * @param {Cryptokey} [cryptokey={keytype: "ksk", active: true}] a Cryptokey
+             * @param {boolean} [returnPrivateKey=false] setting to true returns the private key with the answer
+             * @returns {Object} on success the public key and info will be returned
+             * @example
+                await pdns.createCryptokey("example.com");
+             */
+            createCryptokey(zoneName, cryptokey = {
+                keytype: "ksk",
+                active: true
+            }, returnPrivateKey = false) {
+                if (!zoneName) throw new Error('Missing zone/domain name');
+                if (!cryptokey.keytype) throw new Error('Missing keytype');
+
+                const dname = this.absoluteName(zoneName);
+                const zoneNameSan = dname.substr(0, dname.length - 1).match(secondLevelRegex)[0];
+                return f(`${this.baseurl}/zones/${zoneNameSan}/cryptokeys`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey
+                    },
+                    body: JSON.stringify(cryptokey)
+                }).then(async (res) => {
+                    let j = await res.text().catch();
+                    if (j) {
+                        try {
+                            j = JSON.parse(j);
+                        } catch (err) {
+                            throw j;
+                        }
+                    }
+                    if (returnPrivateKey) return j;
+                    delete j.privatekey;
+                    return j;
+                })
+            }
+            /**
+             * Takes records for single or mixed domains as array and sets them. If records exist it replaces them.
+             * @async
+             * @param {Records} records array containing the records
+             * @returns {Array}  array of booleans indicating the success of each entry
+             * @example 
+               await pdns.setRecords([{
+                   name: "example.com",
+                   type: "A",
+                   ttl: 300,
+                   content: ['1.1.1.1']
+               },{
+                   name: "example.org",
+                   type: "A",
+                   ttl: 300,
+                   content: ['1.1.1.1']
+               },{
+                   name: "example.me",
+                   type: "A",
+                   ttl: 300,
+                   content: ['1.1.1.1','2.2.2.2.']
+               }]);
+             */
+            async setRecords(records) {
+                records = this.sortRecordsByDomainName(records);
+                let ir = [];
+                for (let i = 0; i < records.length; i++) {
+                    ir.push(this.setHomogeneousRecords(records[i]))
+                }
+
+
+                return await Promise.all(ir);
+            }
+            /**
+             * Searches for records in a zone by comparing the RECORDS field NOT the name field. Replaces the found records with the replace string.
+             * @async
+             * @param {String} find string to search for
+             * @param {String} replace string to replace the find string with
+             * @param {String} zone zone to search through
+             * @returns {Number} number of replaced entries
+             * @example
+              await pdns.replaceRecords('1.1.1.1','2.2.2.2','example.com');
+             */
+            async replaceRecords(find, replace, zone) {
+                const toReplace = [];
+                const zoneSets = await this.getZone(zone)
+                if (zoneSets) {
+                    for (let j = 0; j < zoneSets.length; j++) {
+                        const content = [];
+                        let foundOne = false;
+                        for (let k = 0; k < zoneSets[j].records.length; k++) {
+                            if (zoneSets[j].records[k].content === find) {
+                                content.push(replace)
+                                foundOne = true;
+                            } else {
+                                content.push(zoneSets[j].records[k].content);
+                            }
+                        }
+                        if (foundOne) {
+                            toReplace.push({
+                                name: zoneSets[j].name,
+                                type: zoneSets[j].type,
+                                ttl: zoneSets[j].ttl,
+                                content,
+                            });
+                        }
+                    }
+                }
+                await this.setRecords(toReplace);
+                return toReplace.length
+            }
+            /**
+             * Searches for records on the pdns server by comparing the RECORDS field NOT the name field. Replaces the found records with the replace string.
+             * @async
+             * @param {String} find string to search for
+             * @param {String} replace string to replace the find string with
+             * @returns {Number} number of replaced entries
+             * @example
+             await pdns.replaceRecordsGlobal('1.1.1.1','2.2.2.2');
+             */
+            async replaceRecordsGlobal(find, replace) {
+                const allZones = await this.getZones();
+                const toReplace = [];
+                for (let i = 0; i < allZones.length; i++) {
+                    const zoneSets = await this.getZone(allZones[i].name)
+                    if (zoneSets) {
+                        for (let j = 0; j < zoneSets.length; j++) {
+                            const content = [];
+                            let foundOne = false;
+                            for (let k = 0; k < zoneSets[j].records.length; k++) {
+                                if (zoneSets[j].records[k].content === find) {
+                                    content.push(replace)
+                                    foundOne = true;
+                                } else {
+                                    content.push(zoneSets[j].records[k].content);
+                                }
+                            }
+                            if (foundOne) {
+                                toReplace.push({
+                                    name: zoneSets[j].name,
+                                    type: zoneSets[j].type,
+                                    ttl: zoneSets[j].ttl,
+                                    content,
+                                });
+                            }
+                        }
+                    }
+                }
+                await this.setRecords(toReplace);
+                return toReplace.length
+            }
+            /**
+             * Searches for records in a zone by comparing the RECORDS field NOT the name field
+             * @async
+             * @param {String} find string to search for
+             * @param {String} zone zone to search through
+             * @returns {Array} records matching the find string in the content field
+             * @example
+                    await pdns.findRecords('1.1.1.1', 'example.com');
+             */
+            async findRecords(find, zone) {
+                const res = [];
+                const zoneSets = await this.getZone(zone)
+                if (zoneSets) {
+                    for (let j = 0; j < zoneSets.length; j++) {
+                        for (let k = 0; k < zoneSets[j].records.length; k++) {
+                            if (zoneSets[j].records[k].content === find) {
+                                res.push(zoneSets[j]);
+                            }
+                        }
+                    }
+                }
+                return res;
+            }
+            /**
+             * Searches for records on the pdns server by comparing the RECORDS field NOT the name field
+             * @async
+             * @param {String} find string to search for
+             * @returns {Array} records matching the find string in the content field
+             * @example
+              await pdns.findRecordsGlobal('1.1.1.1');
+             */
+            async findRecordsGlobal(find) {
+                const allZones = await this.getZones();
+                const res = [];
+                for (let i = 0; i < allZones.length; i++) {
+                    const zoneSets = await this.getZone(allZones[i].name)
+                    if (zoneSets) {
+                        for (let j = 0; j < zoneSets.length; j++) {
+                            for (let k = 0; k < zoneSets[j].records.length; k++) {
+                                if (zoneSets[j].records[k].content === find) {
+                                    res.push(zoneSets[j]);
+                                }
+                            }
+                        }
+                    }
+                }
+                return res;
+            }
+            /**
+             * Higher level function for creating a zone with a custom soa record, name servers and dnssec
+             * @async
+             * @param {Object} zone string to search for
+             * @returns {Boolean} success on true
+             * @example
+              await pdns.createAndSetupZone({
+                     domain: 'example.com',
+                     nameserver: ['ns1.paulisttoll.somedomain', 'ns2.paulisttoll.somedomain', 'ns3.paulisttoll.somedomain'],
+                     hostmasterEmail:'hostmaster@paulisttoll.somedomain',
+                
+            })
+             */
+            async createAndSetupZone(zone) {
+                await this.createZone(zone.domain).catch(e => {
+                    if (e.toString().includes('Conflict')) console.log(
+                        'domain already exists: skipping creation')
+                });
+                await this.setRecords([{
+                    name: zone.domain.match(secondLevelRegex)[0],
+                    type: "SOA",
+                    ttl: 3600,
+                    content: [
+                        `${this.absoluteName(zone.nameserver[0])} ${zone.hostmasterEmail.replace('@','.')}. 2020111501 10800 3600 604800 3600`
+                    ]
+                }, {
+                    name: zone.domain.match(secondLevelRegex)[0],
+                    type: "NS",
+                    ttl: 3600,
+                    content: zone.nameserver.map(e => this.absoluteName(e))
+                }]).catch(e => {
+                    console.log(e)
+                });
+                return await this.createCryptokey(zone.domain);
+
+            }
+        }
+        const rs = (length = 30) => {
+            let charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\"!§$%&/()=,.-_:;><'*+#",
+                retVal = "";
+            for (var i = 0, n = charset.length; i < length; ++i) {
+                retVal += charset.charAt(Math.floor(Math.random() * n));
+            }
+            return retVal;
+        }
+
+        /**
+         * For all options check out {@link https://demo.mailcow.email/api/}
+         * @typedef Domain
+         * @type {Object}
+         * @prop {String} domain Name of the domain to add
+         * @prop {Number} [active=1] Whether the domain should be active or not
+         * @prop {Number} [aliases=400] Number of aliases allowed
+         * @prop {Number} [defquota=3072]
+         * @prop {Number} [mailboxes=10]
+         * @prop {Number} [maxquota=10240]
+         * @prop {Number} [quota=10240]
+         * @example
+         * {
+            active: 1,
+            domain: "example.com",
+            aliases: 400, // responding "object is not numeric" if missing is this a BUG? should be "aliases missing" if cant be omited anyway
+            backupmx: 0,
+            defquota: 3072,
+            description: "Hello!",
+            lang: "en",
+            mailboxes: 10,
+            maxquota: 10240,
+            quota: 10240,
+            relay_all_recipients: 0,
+            rl_frame: "s",
+            rl_value: 10
+            }
+         *
+         */
+
+
+        /**
+        * Object representing a DKIM Key
+        * @typedef DKIM
+        * @type {Object}
+        * @prop {String} domain The domain which a key should be generated for
+        * @prop {String} [dkim_selector='dkim'] The dkim selector
+        * @prop {2048|1024} [key_size=2048] The size of the key
+        * @example
+         {
+          "domain": "example.com",
+          "dkim_selector": "dkim",
+          "key_size": 2048
+         }
+        */
+
+        /**
+        * Object representing a domain admin
+        * @typedef DomainAdmin
+        * @type {Object}
+        * @prop {Array|String} domains The domains/domain this admin should be able to access
+        * @prop {String} [username=RANDOM]
+        * @prop {String} [password=RANDOM] 
+        * @prop {0|1} [active=1]
+        * @example
+         {
+          "active": 1,
+          "domains": "example.com",
+          "password": "supersecurepw",
+          "username": "testadmin"
+        }
+        */
+
+        /**
+         * Object representing a mailbox
+         * @typedef Mailbox
+         * @type {Object}
+         * @prop {String} domain domain for wich the mailbox shall be created
+         * @prop {String} [local_part="mail"] the local part of the mail address before the @
+         * @prop {String} [name="John Doe"] full name of the user
+         * @prop {String} [password=RANDOM] password for the user. if omitted one will be generated
+         * @prop {Number} [quota=3072] maximum size of the mailbox
+         * @prop {0|1} [active=1] whether the mailbox is active or not
+         * @example
+         {
+          "domain": "example.com",
+          "local_part": "john.doe",
+          "name": "John Doe",
+          "password": "paulIstToll",
+          "quota": 3072,
+          "active": 1
+        }
+         
+         * */
+
+
+
+
+        /** @module mailcow-api */
+        /** 
+         * @class Class representing the Mailcow API client 
+         *@example 
+        (async () => {
+            //get global variables
+            require('dotenv').config();
+            
+            //import the api client module
+            const {
+                MailcowApiClient
+            } = require("mailcow-api")
+
+            //create new mailcow api client with endpoint/baseurl and the api key
+            const mcc = new MailcowApiClient(process.env.MAILCOW_API_BASEURL, process.env.MAILCOW_API_KEY);
+
+            //get all domain on mailcow server
+            console.log(await mcc.getDomain());
+        })();
+        */
+
+        class MailcowApiClient {
+            /**
+             * Create a Mailcow API client.
+             * @constructor
+             * @param {string} baseurl The base url where the api can be found
+             * @param {string} apikey The api key for the mailcow api endpoint
+             * @example
+             * const mcc = new MailcowApiClient(process.env.MAILCOW_API_BASEURL, process.env.MAILCOW_API_KEY);
+             */
+            constructor(baseurl, apikey) {
+                this.baseurl = baseurl;
+                this.apikey = apikey;
+            }
+            /**
+             * Gets a specific domain or all domains
+             * @param {String} [domain='all'] The domain you want to get
+             * @returns {Array} Array of domains
+             * @example
+             * await mcc.getDomain()
+             * */
+            async getDomain(domain) {
+                if (!domain || !domain.length) domain = "all"
+                return f(`${this.baseurl}/api/v1/get/domain/${domain}`, {
+                    method: 'GET',
+                    headers: {
+                        'X-Api-Key': this.apikey
+                    }
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (!j.length) return [j]
+                    console.error(j);
+                    return false;
+                })
+            }
+            /**
+             * Adds a domain to the server
+             * @param {String|Domain} domain The domain you want to add
+             * @returns {Boolean} True on success
+             * @example
+                await mcc.addDomain({
+                    domain: "example.com",
+                }))
+             * */
+            async addDomain(domain) {
+                if (!domain) throw new Error('Missing Domain');
+                if (!domain.domain) {
+                    domain = {
+                        domain
+                    };
+                }
+                if (!domain.domain.match(/[A-Z-a-z0-9]+\.[A-Z-a-z0-9]+$/)) throw new Error(
+                    'domain name is invalid');
+
+                domain.active = typeof (domain.active) == 'undefined' ? 1 : domain.active;
+                domain.aliases = typeof (domain.aliases) == 'undefined' ? 400 : domain.aliases;
+                domain.defquota = typeof (domain.defquota) == 'undefined' ? 3072 : domain.defquota;
+                domain.mailboxes = typeof (domain.mailboxes) == 'undefined' ? 10 : domain.mailboxes;
+                domain.maxquota = typeof (domain.maxquota) == 'undefined' ? 10240 : domain.maxquota;
+                domain.quota = typeof (domain.quota) == 'undefined' ? 10240 : domain.quota;
+
+                return f(`${this.baseurl}/api/v1/add/domain`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(domain)
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j[0].type === 'success') return true;
+                    console.error(j);
+                    return false;
+                });
+            }
+            /**
+             * Edits one or more domains on the server. Applies the attributes to all domains provided.
+             * @param {Array|String} domains The domains you want to edit
+             * @param {Object} attributes Attributes to change for all domains provided domains
+             * @returns {Boolean} True on success
+             * @example
+                await mcc.editDomain(["example.com"], {
+                    aliases: 399
+                });
+                //This will set the aliases of example.com to 399
+             */
+            async editDomain(domains, attributes) {
+                if (typeof domains === 'string') domains = [domains];
+                const body = {
+                    items: domains,
+                    attr: attributes
+                }
+                return f(`${this.baseurl}/api/v1/edit/domain`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(body)
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j[0].type === 'success') return true;
+                    console.error(j);
+                    return false;
+                });
+            }
+            /**
+             * Removes a domain from the server
+             * @param {String|Array} domain The domain/domains you want to delete
+             * @returns {Boolean} True on success
+             * @example
+                await mcc.deleteDomain("example.com")
+             * */
+            async deleteDomain(domain) {
+                if (!Array.isArray(domain)) domain = [domain]
+
+                return f(`${this.baseurl}/api/v1/delete/domain`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(domain)
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j[0].type === 'success') return true;
+                    console.error(j);
+                    return false;
+                });
+            }
+            /**
+             * Generates a DKIM domain key for a domain
+             * @param {String|DKIM} dkim A DKIM object or string 
+             * @returns {Boolean} True on success
+             * @example
+                await mcc.addDKIM({
+                    domain: "example.com",
+                })
+                //This will generate a DKIM key for example.com on the mailcow server
+             */
+            async addDKIM(dkim) {
+                if (!dkim.domain) {
+                    dkim = {
+                        domains: dkim
+                    };
+                } else {
+                    dkim.domains = dkim.domain;
+                }
+
+                if (!dkim) throw new Error('DKIM Key must be provided as DKIM Object');
+                if (!dkim.domains) throw new Error(
+                    'DKIM object must contain a domain name. Example: {domains:"example.com"}');
+                if (!dkim.domains.match(/[A-Z-a-z0-9]+\.[A-Z-a-z0-9]+$/)) throw new Error('domain name is invalid');
+
+                dkim.dkim_selector = typeof (dkim.dkim_selector) == 'undefined' ? 'dkim' : dkim.dkim_selector;
+                dkim.key_size = typeof (dkim.key_size) == 'undefined' ? 2048 : dkim.key_size;
+
+                return f(`${this.baseurl}/api/v1/add/dkim`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(dkim)
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j && j[0] && j[0].type === 'success') return true;
+                    console.error(j);
+                    return false;
+                });
+            }
+            /**
+             * Gets the DKIM key for a domain on the mailcow server
+             * @param {String} domain the domain name you want to get the key for
+             * @returns {Object} The DKIM public key and other parameters
+             * @example
+                await mcc.getDKIM('example.com')
+                //This will get the DKIM key for the domain example.com from the mailcow server
+             */
+            async getDKIM(domain) {
+                return f(`${this.baseurl}/api/v1/get/dkim/${domain}`, {
+                    method: 'GET',
+                    headers: {
+                        'X-Api-Key': this.apikey
+                    }
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j.pubkey) return j;
+                    return false;
+                });
+            }
+            /**
+             * Deletes the DKIM key for a domain on the mailcow server
+             * @param {Array} domain the domain name/names you want to delete the key for
+             * @returns {Boolean} true on success 
+             * @example
+                await mcc.deleteDKIM('example.com')
+                //This will delete the DKIM key for the domain example.com from the mailcow server
+             */
+            async deleteDKIM(domain) {
+                if (!Array.isArray(domain)) domain = [domain]
+                return f(`${this.baseurl}/api/v1/delete/dkim/`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(domain)
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j && j[0] && j[0].type === 'success') return true;
+                    console.error(j);
+                    return false;
+                });
+            }
+            /**
+             * Generates a DKIM domain key for a domain and returns it
+             * @param {String|DKIM} dkim A DKIM object or string
+             * @returns {Object} DKIM key on success
+             * @example
+                await mcc.addAndGetDKIM({
+                    domain: "example.com",
+                })
+                //This will generate a DKIM key for example.com on the mailcow server and return it
+             */
+            async addAndGetDKIM(dkim) {
+                if (!dkim.domain) {
+                    dkim = {
+                        domain: dkim
+                    };
+                }
+                const res = await this.getDKIM(dkim.domain);
+                if (res) return res;
+                await this.addDKIM(dkim);
+                return await this.getDKIM(dkim.domain);
+            }
+            /**
+             * Adds a domain admin to the mailcow server
+             * @param {DomainAdmin} domainAdmin a domain admin object that has to contain at least the domains the admin should be able to control
+             * @returns {Object} containing password username and domains on successfull creation
+             * @example
+                await mcc.addDomainAdmin({
+                    domains: ['example.com', 'example.org']
+                })
+                //This will add an admin for the domains example.com and example.org and return their credentials
+             */
+            async addDomainAdmin(domainAdmin) {
+                if (!domainAdmin) throw new Error('Domain admin must be provided as DomainAdmin Object');
+                if (!domainAdmin.domains) throw new Error(
+                    'Domain admin object must contain a domain name. Example: {domains:"example.com"}');
+                if (typeof domainAdmin.domains === 'string') domainAdmin.domains = [domainAdmin.domains];
+                if (!domainAdmin.domains[0].match(/[A-Z-a-z0-9]+\.[A-Z-a-z0-9]+$/)) throw new Error(
+                    'domain name is invalid');
+
+                domainAdmin.active = typeof (domainAdmin.active) == 'undefined' ? 1 : domainAdmin.active;
+                domainAdmin.password = typeof (domainAdmin.password) == 'undefined' ? rs.generate(100) : domainAdmin
+                    .password;
+                domainAdmin.username = typeof (domainAdmin.username) == 'undefined' ? "domain_admin_" + rs.generate(
+                    20) : domainAdmin.username;
+                domainAdmin.password2 = domainAdmin.password;
+
+                return f(`${this.baseurl}/api/v1/add/domain-admin`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(domainAdmin)
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j && j[0] && j[0].type === 'success') return {
+                        username: domainAdmin.username,
+                        password: domainAdmin.password,
+                        domains: domainAdmin.domains
+                    };
+                    console.error(j);
+                    return false;
+                });
+
+            }
+            /**
+             * Adds a mailbox for a domain to the mailcow server
+             * @param {Mailbox} mailbox a Mailbox object that has to contain at least the domain for which the mailbox shall be created
+             * @returns {Object} the created mailbox
+             * @example
+                await mcc.addMailbox({
+                    domain: 'example.com',
+                    name: 'Example'
+                })
+                //This will add a mailbox for the domain example.com and return it 
+             */
+            async addMailbox(mailbox) {
+                if (!mailbox) throw new Error('Mailbox must be provided as Mailbox Object');
+                if (!mailbox.domain) throw new Error(
+                    'Mailbox object must at least contain a domain name. Example: {domain:"example.com"}');
+                if (!mailbox.domain.match(/[A-Z-a-z0-9]+\.[A-Z-a-z0-9]+$/)) throw new Error(
+                    'domain name is invalid');
+
+                mailbox.active = typeof (mailbox.active) == 'undefined' ? 1 : mailbox.active;
+                mailbox.password = typeof (mailbox.password) == 'undefined' ? rs.generate(100) : mailbox.password;
+                mailbox.password2 = mailbox.password;
+                mailbox.quota = typeof (mailbox.quota) == 'undefined' ? 3072 : mailbox.quota;
+                mailbox.name = typeof (mailbox.name) == 'undefined' ? 'John Doe' : mailbox.name;
+                mailbox.local_part = typeof (mailbox.local_part) == 'undefined' ? 'mail' : mailbox.local_part;
+
+                return f(`${this.baseurl}/api/v1/add/mailbox`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(mailbox)
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j && j[0] && j[0].type === 'success') return {
+                        username: mailbox.local_part + '@' + mailbox.domain,
+                        password: mailbox.password,
+                        domain: mailbox.domain,
+                        name: mailbox.name,
+                        local_part: mailbox.local_part,
+                        quota: mailbox.quota
+                    };
+                    console.error(j);
+                    return false;
+                });
+            }
+            /**
+             * Deletes a mailbox 
+             * @param {String|Array} mailboxes complete name of the mailbox/mailboxes
+             * @returns {Boolean} true on success
+             * @example
+                await mcc.deleteMailbox("mail@example.com")
+                //This will delete the mailbox mail@example.com
+             */
+            async deleteMailbox(mailboxes) {
+                if (typeof mailboxes === 'string') mailboxes = [mailboxes];
+                if (!mailboxes[0].match(/[A-Z-a-z0-9]+\.[A-Z-a-z0-9]+$/)) throw new Error('domain name is invalid');
+
+                return f(`${this.baseurl}/api/v1/delete/mailbox`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(mailboxes)
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j && j[0] && j[0].type === 'success') return true;
+                    console.error(j);
+                    return false;
+                });
+            }
+            /**
+             * Adds an alias for a mailbox 
+             * @param {String} address alias address, for catchall use "@domain.tld"
+             * @param {String} goto destination address, comma separated
+             * @returns {Boolean} true on success
+             * @example
+                await mcc.addAlias("@test.tld","mail@example.com")
+                //This will catch all mail for the domain test.tld and put it in the mailbox mail@example.com
+             */
+            async addAlias(address, goto) {
+                return f(`${this.baseurl}/api/v1/add/alias`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Api-Key': this.apikey,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        address,
+                        goto,
+                        active: "1"
+                    })
+                }).then(async (res) => {
+                    const j = await res.json().catch();
+                    if (j && j[0] && j[0].type === 'success') return true;
+                    console.error(j);
+                    return false;
+                });
+            }
+
+        }
+
+
+
+
+
+
+
+
+
+        /**
+         * @typedef ApiInfo
+         * @type {object}
+         * @prop {object} mailcow
+         * @prop {string} mailcow.url
+         * @prop {string} mailcow.apikey
+         * @prop {object} powerdns
+         * @prop {String} powerdns.url
+         * @prop {String} powerdns.apikey
+         * @example
+            {
+                mailcow: {
+                    url: process.env.MAILCOW_API_URL,
+                    apikey: process.env.MAILCOW_API_KEY
+                },
+                powerdns: {
+                    url: process.env.PDNS_API_URL,
+                    apikey: process.env.PDNS_API_KEY
+                }
+            }
+         *
+         */
+
+        /**
+        * @typedef Info
+        * @type {object}
+        * @prop {Array.<string>} nameserver array of nameservers for your domain, first ns in the list will be used as primary
+        * @prop {string} hostmasterEmail hostnmaster email address
+        * @prop {string} [dmarcMail] add mail if you want to get dmarc reports
+        * @prop {string} mailDomain the domain you may want to add mail for
+        * @prop {String} mailServerHostname the hostname of the mailserver
+        * @prop {Object} defaultMailbox
+        * @prop {String} defaultMailbox.local_part local part of you mailbox (the part before the @ not including the @)
+        * @prop {String} defaultMailbox.name the name of mailbox
+        * @prop {String} [defaultMailbox.password=RANDOM] will generate a random password for your mailbox if omitted
+        * @prop {String} mailServerIp IPv6 address of your mailserver
+        * @prop {String} mailServerLegacyIp IPv4 address of your mailserver
+        * @prop {Boolean=} addLetsEncryptCAA enable this option if you are ONLY using letsencrypt certs
+        * @prop {String=} caaReportMail
+        * @prop {String=} [openssl_path='openssl'] optional alternative path for openssl
+        * @example
+           {
+                nameserver: ['ns1.domain.tld', 'ns2.domain.tld', 'ns3.domain.tld'],
+                hostmasterEmail: 'hostmaster@domain.tld',
+                dmarcMail: 'postmaster@domain.tld', 
+                mailDomain: 'domain.tld',
+                mailServerHostname: 'mail.domain.tld',
+                defaultMailbox: {
+                    local_part: `max.mustermensch`,
+                    name: `Max Mustermensch`
+                },
+                //NEEDED FOR MAILSERVER DOMAIN SETUP
+                mailServerIp: '2a00:1450:4016:801::2003', //Your IPv6 address WITHOUT brackets([]) 
+                mailServerLegacyIp: '127.0.0.1',//Your IPv4 address
+                addLetsEncryptCAA: true,
+                caaReportMail: 'caa.report@domain.tld' //can be set if you want to get reports on malicious cert issues
+            }
+        *
+        */
+
+        /** @module postkutsche*/
+        /** 
+         * @class Class representing the Postkutsche client
+         * @example
+            (async () => {
+            //import the process.env variables from the .env file in which you should store them
+            //you can install dotenv with `npm i dotenv --save-dev` or `yarn add dotenv --dev`
+            require('dotenv').config();
+
+            //import the Postkutsche class
+            const {
+                Postkutsche
+            } = require("./index.js");
+
+            //create a new instance of Postkutsche providing it with the necessary api keys
+            const pk = new Postkutsche({
+                mailcow: {
+                    url: process.env.MAILCOW_API_URL,
+                    apikey: process.env.MAILCOW_API_KEY
+                },
+                powerdns: {
+                    url: process.env.PDNS_API_URL,
+                    apikey: process.env.PDNS_API_KEY
+                }
+            });
+
+            const info={
+                nameserver: ['ns1.domain.tld', 'ns2.domain.tld', 'ns3.domain.tld'],
+                hostmasterEmail: 'hostmaster@domain.tld',
+                dmarcMail: 'postmaster@domain.tld', 
+                mailDomain: 'domain.tld',
+                mailServerHostname: 'mail.domain.tld',
+                defaultMailbox: {
+                    local_part: `max.mustermensch`,
+                    name: `Max Mustermensch`
+                },
+                //NEEDED FOR MAILSERVER DOMAIN SETUP
+                mailServerIp: '2a00:1450:4016:801::2003', //Your IPv6 address WITHOUT brackets([]) 
+                mailServerLegacyIp: '127.0.0.1',//Your IPv4 address
+                addLetsEncryptCAA: true,
+                caaReportMail: 'caa.report@domain.tld' //can be set if you want to get reports on malicious cert issues
+            }
+
+            //use a function from the Postkutsche class
+            //adds the mail records for a domain and creates the domain on mailcow
+            await pk.addMailDomain(info);
+        })();
+         */
+        class Postkutsche {
+            /**
+             * Create a postkutsche client.
+             * @constructor
+             * @param {ApiInfo} info The provided {@link https://doc.y.gy/postkutsche/global.html#ApiInfo ApiInfo} object
+             */
+            constructor(info) {
+                this.mcc = new MailcowApiClient(info.mailcow.url, info.mailcow.apikey);
+                this.pdns = new PowerdnsClient(info.powerdns.url, info.powerdns.apikey);
+            }
+
+            /**
+             * @param {Info} info {@link https://doc.y.gy/postkutsche/global.html#Info Info} object with the necessary information to generate the domain mail records
+             * @function
+             * @returns {Array} with domain relevant mail records
+             * @example
+                pk.genMailDomainRecords({
+                    mailServerHostname: 'mail.domain.tld',
+                    mailDomain: 'domain.tld',
+                    dmarcMail: 'dmarc@domain.tld'
+                });
+             */
+            genMailDomainRecords = (info) => {
+                return [{
+                        name: `${info.mailDomain}.`,
+                        type: 'MX',
+                        content: [`10 ${info.mailServerHostname}.`]
+                    }, {
+                        name: `autodiscover.${info.mailDomain}.`,
+                        type: 'CNAME',
+                        content: [`${info.mailServerHostname}.`]
+                    }, {
+                        name: `_autodiscover._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 443 ${info.mailServerHostname}.`]
+                    }, {
+                        name: `autoconfig.${info.mailDomain}.`,
+                        type: 'CNAME',
+                        content: [`${info.mailServerHostname}.`]
+                    }, {
+                        name: `${info.mailDomain}.`,
+                        type: `TXT`,
+                        content: [`"v=spf1 MX -all"`]
+                    }, {
+                        name: `_dmarc.${info.mailDomain}.`,
+                        type: `TXT`,
+                        content: [
+                            `"v=DMARC1;p=reject;sp=reject;${info.dmarcMail?"rua=mailto:"+info.dmarcMail+";ruf=mailto:"+info.dmarcMail+";":""}adkim=s;aspf=s;"`
+                        ]
+                    }, {
+                        name: `_imap._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 143 ${info.mailServerHostname}.`]
+                    },
+                    {
+                        name: `_imaps._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 993 ${info.mailServerHostname}.`]
+                    },
+                    {
+                        name: `_pop3._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 110 ${info.mailServerHostname}.`]
+                    },
+                    {
+                        name: `_pop3s._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 995 ${info.mailServerHostname}.`]
+                    },
+                    {
+                        name: `_submission._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 587 ${info.mailServerHostname}.`]
+                    },
+                    {
+                        name: `_smtps._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 465 ${info.mailServerHostname}.`]
+                    },
+                    {
+                        name: `_sieve._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 4190 ${info.mailServerHostname}.`]
+                    },
+                    {
+                        name: `_carddavs._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 443 ${info.mailServerHostname}.`]
+                    },
+                    {
+                        name: `_caldavs._tcp.${info.mailDomain}.`,
+                        type: 'SRV',
+                        content: [`0 1 443 ${info.mailServerHostname}.`]
+                    },
+                    {
+                        name: `_carddavs._tcp.${info.mailDomain}.`,
+                        type: 'TXT',
+                        content: [`"path=/SOGo/dav/"`]
+                    },
+                    {
+                        name: `_caldavs._tcp.${info.mailDomain}.`,
+                        type: 'TXT',
+                        content: [`"path=/SOGo/dav/"`]
+                    }
+                ]
+            }
+            /**
+             * This will add:
+             *  - Mailcow: 
+             *      - Domain (if not present)
+             *      - Mailbox (if not present)
+             *      - DKIM Key (if not present)
+             *      - Alias: catchall (catchall will relay everything @yourdomain.tld to your Mailbox) (if not present)
+             *  - PowerDns: 
+             *      - Domain (if not present)
+             *      - Mail records for the domain (won't touch other records but will overwrite present matching records)
+             *      - DNSSEC (if domain wasn't present)
+             *      - Create record on mailServerDomain(if not the same as mailDomain) to allow dmarc mails to sent to this domain
+             * @param {Info} info {@link https://doc.y.gy/postkutsche/global.html#Info Info} object with the necessary information to create a mail domain on mailcow and the necessary records on powerdns
+             * @function
+             * @param {Boolean} [log=true] you can disable logging by setting this to false
+             * @async
+             * @returns {Boolean} true on success
+             * @example
+                await pk.addMailDomain({
+                    nameserver: ['ns1.domain.tld', 'ns2.domain.tld', 'ns3.domain.tld'],
+                    hostmasterEmail: 'hostmaster@domain.tld',
+                    dmarcMail: 'postmaster@domain.tld', 
+                    mailDomain: 'domain.tld',
+                    mailServerHostname: 'mail.domain.tld',
+                    defaultMailbox: {
+                        local_part: `max.mustermensch`,
+                        name: `Max Mustermensch`,
+                        password:`set some good password here` //can be omitted
+                    }
+                });
+             */
+            addMailDomain = async (info, log = true) => {
+                info.domain = info.mailDomain;
+                if (log) {
+                    console.log(`Adding zone ${info.mailDomain} to PowerDns if it doesn't exist`);
+                    console.log(`Adding domain ${info.mailDomain} to Mailcow if it doesn't exist`);
+                    console.log(`Adding DKIM key for ${info.mailDomain} to Mailcow if it doesn't exist`);
+                }
+                const add = await Promise.all([this.pdns.createAndSetupZone(info), this.mcc.addDomain(info
+                    .mailDomain), this.mcc.addAndGetDKIM(info.mailDomain)]);
+
+                console.log(
+                    `You have to add the following key to your domain at your registrar (where you bought the domain)`
+                );
+                console.log(add[0]);
+
+                if (log) {
+                    console.log(`Generating mail domain records for ${info.mailDomain}`);
+                }
+                const records = this.genMailDomainRecords(info);
+
+                records.push({
+                    name: `dkim._domainkey.${info.mailDomain}.`,
+                    type: 'TXT',
+                    content: [`"${add[2].dkim_txt}"`]
+                });
+
+                if (info.dmarcMail && info.mailDomain !== info.dmarcMail.match(secondLevelRegex)[0]) {
+                    if (log) {
+                        console.log(
+                            `Adding record to DMARC mail domain ${info.dmarcMail.match(secondLevelRegex)[0]} to allow the sending of ${info.mailDomain} DMARC reports there`
+                        );
+                    }
+                    this.pdns.setHomogeneousRecords([{
+                        name: `${info.mailDomain}._report._dmarc.${info.dmarcMail.match(secondLevelRegex)[0]}`,
+                        type: 'TXT',
+                        content: [`"v=DMARC1"`]
+                    }]).catch(e => console.log(e))
+                }
+                if (log) {
+                    console.log(`Adding generated records to PowerDns server`);
+                    console.log(`Adding mailbox to Mailcow server`);
+                }
+                const b = await Promise.all([
+                    this.pdns.setHomogeneousRecords(records).catch(e => console.log(e)),
+                    this.mcc.addMailbox({
+                        domain: info.mailDomain,
+                        name: info.defaultMailbox.name,
+                        local_part: info.defaultMailbox.local_part,
+                        password: info.defaultMailbox.password ? info.defaultMailbox.password :
+                            undefined
+                    })
+                ]);
+
+                if (log) {
+                    console.log(`Adding catchall alias to ${info.mailDomain}`);
+                }
+                this.mcc.addAlias(`@${info.mailDomain}`,
+                    `${info.defaultMailbox.local_part}@${info.mailDomain}`);
+                if (!info.defaultMailbox.password) {
+                    console.log(`The password for your mailbox is`);
+                    console.log(b[1].password);
+                }
+                if (log) {
+                    console.log(`Done adding domain ${info.mailDomain}`);
+                }
+                console.log(`Don't forget to add the DNSSEC domainkey above to your registrar.`);
+                return true;
+
+            }
+            /**
+             * This will add:
+             *  - PowerDns: 
+             *      - Domain for the mailserver hostname (if not present)
+             *      - DNSSEC (will replace old dnssec if present)
+             *      - TLSA records for the domain (for the creation of the tlsa records you need to have openssl installed. you can specify the path, if it can't be found globally as 'openssl')
+             *      - Records for the mailserver
+             * @param {Info} info {@link https://doc.y.gy/postkutsche/global.html#Info Info} object with the necessary information to create the relevant records for the mailserver
+             * @function
+             * @param {Boolean} [log=true] you can disable logging by setting this to false
+             * @async
+             * @returns {Boolean} true on success
+             * @example
+                await pk.addMailServerDnsRecords({
+                    nameserver: ['ns1.domain.tld', 'ns2.domain.tld', 'ns3.domain.tld'],
+                    hostmasterEmail: 'hostmaster@domain.tld',
+                    mailServerHostname: 'mail.domain.tld',
+                    mailServerIp: '2a00:1450:4016:801::2003', //Your IPv6 address WITHOUT brackets([]) 
+                    mailServerLegacyIp: '127.0.0.1',//Your IPv4 address
+                    addLetsEncryptCAA: true,
+                    caaReportMail: 'caa.report@domain.tld' //can be set if you want to get reports on malicious cert issues
+            });
+             */
+            addMailServerDnsRecords = async (info, log = true) => {
+                info.domain = info.mailServerHostname
+                if (log) {
+                    console.log(`Adding zone ${info.mailServerHostname} to PowerDns if it doesn't exist`);
+                }
+                const z = await this.pdns.createAndSetupZone(info).catch(e => {
+                    console.log(e);
+                });
+
+                console.log(
+                    `You have to add the following key to your domain at your registrar (where you bought the domain)`
+                );
+                console.log(z);
+
+                if (log) {
+                    console.log(`Creating TLSA records for your mail server domain.`);
+                    console.log(`Info: You need to have openssl installed for this to work`);
+                    console.log(
+                        `Info: If openssl is not accessible throug the global command 'openssl' you can specify the path by adding it to the passed info object with the key 'openssl_path' for more information look here https://doc.y.gy/postkutsche/global.html#Info`
+                    );
+                }
+
+                if (log) console.log(`Adding mail server ip records`);
+
+                if (info.mailServerLegacyIp) {
+                    records.push({
+                        name: info.mailServerHostname,
+                        type: 'A',
+                        content: [info.mailServerLegacyIp]
+                    });
+                }
+                if (info.mailServerIp) {
+                    records.push({
+                        name: info.mailServerHostname,
+                        type: 'AAAA',
+                        content: [info.mailServerIp]
+                    });
+                }
+                if (info.addLetsEncryptCAA) {
+                    if (log) console.log(`Adding mail server caa records`);
+
+                    const content = [`0 issue "digicert.com"`, `0 issue "letsencrypt.org"`];
+                    info.caaReportMail ? content.push(`0 iodef "mailto:${info.caaReportMail}"`) : '';
+                    records.push({
+                        name: info.mailServerHostname.match(secondLevelRegex)[0],
+                        type: 'CAA',
+                        content: content
+                    });
+                }
+                if (log) console.log(`Setting all records on the PowerDns server`);
+
+                this.pdns.setHomogeneousRecords(records).catch(e => {
+                    console.log(e);
+                });
+                if (log) console.log(`Finished adding records for the mail server ${info.mailServerHostname}`);
+                console.log(`Don't forget to add the DNSSEC domainkey above to your registrar.`);
+
+                return true;
+            }
+            /**
+             * Creates the front part of the openpgp dns record
+             * @param {String} localPart local part of your email address (the part before the @ not including the @)
+             * @function
+             * @async
+             * @example
+               console.log(pk.openpgpHash('max.mustermensch'));
+             */
+            openpgpHash = async (localPart) => {
+
+                async function digestMessage(message) {
+                    const msgUint8 = new TextEncoder().encode(message); // encode as (utf-8) Uint8Array
+                    const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8); // hash the message
+                    const hashArray = Array.from(new Uint8Array(
+                        hashBuffer)); // convert buffer to byte array
+                    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join(
+                        ''); // convert bytes to hex string
+
+                    return hashHex;
+                }
+
+                return (await digestMessage(localPart)).substring(0, 56);
+            }
+            /**
+             * Creates an openpgp dns record
+             * @param {String} localPart local part of your email address (the part before the @ not including the @)
+             * @param {String} publicKeyB64 your publickey in base64 (it should be correct if it includes -----BEGIN PGP PUBLICKEY BLOCK-----) or only contains these characters: A-Z a-z 0-9 + /
+             * @function
+             * @async
+             * @returns {OpenpgpRecord}
+             * @example
+               console.log(pk.openpgpRecord('max.mustermensch','-----BEGIN PGP (...)'));
+             */
+            openpgpRecord = async (localPart, publicKeyB64) => {
+                const c = publicKeyB64.replaceAll(/[\n\r\s]*/g, '').replace('-----BEGINPGPPUBLICKEYBLOCK-----',
+                        '')
+                    .replace('-----ENDPGPPUBLICKEYBLOCK-----', '').match(/^[A-Za-z0-9+/]*/)[0];
+                if (!c) throw Error('Invalid Public Key')
+                const hash = await this.openpgpHash(localPart);
+                return {
+                    name: `${hash}._openpgpkey.`,
+                    type: `OPENPGPKEY`,
+                    content: [c]
+                }
+            }
+            /**
+             * Sets an openpgp record on your powerdns server
+             * Will overwrite key with the same local part
+             * @param {String} localPart local part of your email address (the part before the @ not including the @)
+             * @param {String} domain the domain you want to add the key to
+             * @param {String} publicKeyB64 your publickey in base64 (it should be correct if it includes -----BEGIN PGP PUBLICKEY BLOCK-----) or only contains these characters: A-Z a-z 0-9 + /
+             * @function
+             * @async
+             * @example
+               await pk.setOpenpgpRecord('max.mustermensch','domain.tld','-----BEGIN PGP (...)');
+             */
+            setOpenpgpRecord = async (localPart, domain, publicKeyB64) => {
+                const record = this.openpgpRecord(localPart, publicKeyB64);
+                record.name = record.name + domain;
+                await this.pdns.setRecords([record]).catch(e => console.log(e));
+            }
+            /**
+             * Will delete the complete mailserver domain from powerdns
+             * @param {Info} info {@link https://doc.y.gy/postkutsche/global.html#Info Info} object with the necessary information to delete the mailserver domain 
+             * @function
+             * @async
+             * @example
+                pk.cleanupAddMailServer({mailServerHostname:'mail.domain.tld'});
+             */
+            cleanupAddMailServer = async (info) => {
+                await this.pdns.deleteZone(info.mailServerHostname);
+            }
+            /**
+             * Will delete a domain from powerdns and mailcow
+             * THIS WILL DELETE YOUR MAILBOX AND EVERYTHING ELSE CONCERNING THIS DOMAIN
+             * @param {Info} info {@link https://doc.y.gy/postkutsche/global.html#Info Info} object with the necessary information to create a mail domain on mailcow and the necessary records on powerdns
+             * @function
+             * @async
+             * @example
+                 await pk.cleanupAddMailDomain({
+                     dmarcMail: 'postmaster@domain.tld', 
+                     mailDomain: 'domain.tld',
+                     defaultMailbox: {
+                         local_part: `max.mustermensch`,
+                         name: `Max Mustermensch`
+                     }
+                 });
+             */
+            cleanupAddMailDomain = async (info) => {
+                await this.mcc.deleteMailbox(`${info.defaultMailbox.local_part}@${info.mailDomain}`).catch(e =>
+                    console.log(e));
+                await Promise.all([
+                    this.mcc.deleteDomain(info.mailDomain),
+                    this.mcc.deleteDKIM(info.mailDomain),
+                    this.pdns.deleteZone(info.mailDomain),
+                ]);
+                if (info.dmarcMail && info.mailDomain !== info.dmarcMail.match(secondLevelRegex)[0]) {
+                    this.pdns.deleteRecords([{
+                        name: `${info.mailDomain}._report._dmarc.${info.dmarcMail.match(secondLevelRegex)[0]}`,
+                        type: 'TXT'
+                    }]).catch(e => console.log(e));
+                }
+            }
+        }
+
+        /**
+             * Creates the front part of the openpgp dns record
+             * @param {String} localPart local part of your email address (the part before the @ not including the @)
+             * @function
+             * @async 
+             * @example
+               console.log(pk.openpgpHash('max.mustermensch'));
+             */
+        const openpgpHash = async (localPart) => {
+
+            async function digestMessage(message) {
+                const msgUint8 = new TextEncoder().encode(message); // encode as (utf-8) Uint8Array
+                const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8); // hash the message
+                const hashArray = Array.from(new Uint8Array(
+                    hashBuffer)); // convert buffer to byte array
+                const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join(
+                    ''); // convert bytes to hex string
+
+                return hashHex;
+            }
+
+            return (await digestMessage(localPart)).substring(0, 56);
+        }
+        /**
+        * Creates an openpgp dns record
+        * @param {String} localPart local part of your email address (the part before the @ not including the @)
+        * @param {String} publicKeyB64 your publickey in base64 (it should be correct if it includes -----BEGIN PGP PUBLICKEY BLOCK-----) or only contains these characters: A-Z a-z 0-9 + /
+        * @function
+        * @async
+        * @returns {OpenpgpRecord}
+        * @example
+        console.log(pk.openpgpRecord('max.mustermensch','-----BEGIN PGP (...)'));
+        */
+        const openpgpRecord = async (localPart, publicKeyB64) => {
+            const c = publicKeyB64.replaceAll(/[\n\r\s]*/g, '').replace('-----BEGINPGPPUBLICKEYBLOCK-----',
+                    '')
+                .replace('-----ENDPGPPUBLICKEYBLOCK-----', '').match(/^[A-Za-z0-9+/]*/)[0];
+            if (!c) throw Error('Invalid Public Key')
+            const hash = await openpgpHash(localPart);
+            return {
+                name: `${hash}._openpgpkey.`,
+                type: `OPENPGPKEY`,
+                content: [c]
+            }
+        }
+    </script>
+
+</body>
+
+</html>
