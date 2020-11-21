@@ -23,10 +23,6 @@ await pk.openpgpHash('your.local.email.name');
 Go to the bottom of the index.html and add your functions.
 
 # Use the powerdns-api or the mailcow-api without postkutsche
-1. Press F12 or ctrl/strg + shift + i to open the developer tools and navigate to the console.
-1.1 If the console is not directly visible press 'ESC' to open it
-
-2.
 ```js
 let mailcowClient=new MailcowApiClient('https://mail.example.com','yourMailcowApiKey');
 
