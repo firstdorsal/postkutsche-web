@@ -1,7 +1,7 @@
 # postkutsche-web
 <img draggable="none" src="https://git.y.gy/firstdorsal/postkutsche-web/-/raw/master/logo.jpg" style="float:left; margin-right:10px;" height="100"> 
 
-## The Postkutsche module packed in a single html file ready to be executed directly in your browser without downloading anything else!
+## Postkutsche is a module that combines PowerDns and Mailcow to create a mail domain with all required entries on both services in a single command. This is the same module packed in a single html file ready to be executed directly in your browser without downloading anything else!
 
 ## The TLSA record creation is **NOT** supported in the browser as it requires openssl to be executed.
 
