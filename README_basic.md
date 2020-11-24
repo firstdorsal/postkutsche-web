@@ -11,6 +11,7 @@ Download the index.html from this repository: [here](https://git.y.gy/firstdorsa
 # Basic use
 ## With the dev console
 1. Press F12 or ctrl/strg + shift + i to open the developer tools and navigate to the console.
+
 1.1 If the console is not directly visible press 'ESC' to open it
 
 2. Create a Postkutsche client
